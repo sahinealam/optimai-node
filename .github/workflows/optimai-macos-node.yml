@@ -30,11 +30,8 @@ jobs:
         env:
           CODE: ${{ github.event.inputs.code }}
         run: |
-          # Shadow the macOS 'open' command so the CLI's login URL is printed instead of opened
-          printf '#!/bin/bash
-echo "OPEN_CALLED: $@"
-exit 0
-' > /usr/local/bin/open
+          # Shadow the macOS open command so the CLI login URL is printed instead of opened
+          printf '#!/bin/bash\necho "OPEN_CALLED: $@"\nexit 0\n' > /usr/local/bin/open
           chmod +x /usr/local/bin/open
           if [ -n "$CODE" ]; then
             echo "Feeding provided redirect URL into CLI..."
@@ -50,8 +47,9 @@ exit 0
       - name: Docker attempt (for later node start)
         if: always() && github.event.inputs.code != ''
         run: |
+          rm -f /usr/local/bin/open
           brew install --cask docker || echo "docker cask install failed"
-          nohup open -a Docker >/dev/null 2>&1 &
+          nohup /usr/bin/open -a Docker >/dev/null 2>&1 &
           for i in $(seq 1 30); do
             if docker info >/dev/null 2>&1; then
               echo "Docker is RUNNING"
