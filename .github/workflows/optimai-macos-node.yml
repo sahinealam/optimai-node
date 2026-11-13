@@ -3,11 +3,16 @@ name: optimai-macos-node
 
 on:
   workflow_dispatch:
+    inputs:
+      code:
+        description: 'Redirected URL (or code param) from browser login'
+        required: false
+        default: ''
 
 jobs:
   mac-node:
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Platform info
         run: |
@@ -21,15 +26,31 @@ jobs:
           sudo mv /tmp/optimai-cli /usr/local/bin/optimai-cli
           optimai-cli --version || true
 
-      - name: Login (paste mode - check logs for URL/code!)
+      - name: Login (intercept browser open to capture URL)
+        env:
+          CODE: ${{ github.event.inputs.code }}
         run: |
-          optimai-cli auth login --paste || echo "LOGIN_EXIT_CODE: $?"
+          # Shadow the macOS 'open' command so the CLI's login URL is printed instead of opened
+          printf '#!/bin/bash
+echo "OPEN_CALLED: $@"
+exit 0
+' > /usr/local/bin/open
+          chmod +x /usr/local/bin/open
+          if [ -n "$CODE" ]; then
+            echo "Feeding provided redirect URL into CLI..."
+            echo "$CODE" | optimai-cli auth login --paste || echo "LOGIN_EXIT: $?"
+          else
+            echo "Phase 1: capturing login URL..."
+            optimai-cli auth login --paste || echo "LOGIN_EXIT: $?"
+          fi
+          echo "--- state files ---"
+          ls -la ~/.optimai 2>/dev/null || true
+          find ~ -maxdepth 3 -iname "*optimai*" 2>/dev/null | head -20 || true
 
-      - name: Docker and node attempt
-        if: always()
+      - name: Docker attempt (for later node start)
+        if: always() && github.event.inputs.code != ''
         run: |
           brew install --cask docker || echo "docker cask install failed"
-          ls /Applications | grep -i docker || true
           nohup open -a Docker >/dev/null 2>&1 &
           for i in $(seq 1 30); do
             if docker info >/dev/null 2>&1; then
@@ -40,11 +61,9 @@ jobs:
             echo "waiting for docker... ($i/30)"
             sleep 10
           done
-          docker info || echo "::warning::Docker unavailable on this runner"
           if docker info >/dev/null 2>&1; then
-            echo "Starting OptimAI node..."
             optimai-cli node start || true
-          else
-            echo "Docker unavailable - cannot start node on this runner"
             optimai-cli node status || true
+          else
+            echo "::warning::Docker unavailable on this runner"
           fi
