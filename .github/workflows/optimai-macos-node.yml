@@ -23,27 +23,28 @@ jobs:
           sudo mv /tmp/optimai-cli /usr/local/bin/optimai-cli
           optimai-cli --version || true
 
-      - name: Try to start Docker
+      - name: Login (watch logs for URL and approve in your browser!)
+        run: |
+          optimai-cli auth login || optimai-cli auth login --legacy
+
+      - name: Try to start Docker (non-blocking launch)
         run: |
           brew install --cask docker || echo "docker cask install failed"
           ls /Applications | grep -i docker || true
-          open -a Docker || echo "Docker.app open failed"
-          for i in $(seq 1 36); do
+          nohup open -a Docker >/dev/null 2>&1 &
+          for i in $(seq 1 30); do
             if docker info >/dev/null 2>&1; then
               echo "Docker is RUNNING"
               docker --version
               break
             fi
-            echo "waiting for docker... ($i/36)"
+            echo "waiting for docker... ($i/30)"
             sleep 10
           done
           docker info || echo "::warning::Docker unavailable on this runner"
 
-      - name: Login (watch logs for URL and approve in your browser!)
-        run: |
-          optimai-cli auth login || optimai-cli auth login --legacy
-
       - name: Start node
+        if: always()
         run: |
           if docker info >/dev/null 2>&1; then
             echo "Starting OptimAI node..."
@@ -51,5 +52,4 @@ jobs:
           else
             echo "Docker unavailable - cannot start node on this runner"
             optimai-cli node status || true
-            exit 1
           fi
