@@ -1,0 +1,55 @@
+# OptimAI macOS Core Node - GitHub Actions (free route)
+name: optimai-macos-node
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mac-node:
+    # macos-26 = newest runner; reports say nested virtualization (Docker) works here
+    runs-on: macos-26
+    # public repo = unlimited free standard runner minutes
+    timeout-minutes: 120
+    steps:
+      - name: Platform info
+        run: |
+          sw_vers
+          uname -m
+
+      - name: Install OptimAI CLI
+        run: |
+          curl -fL https://cli-node.optimai.network/optimai_cli_darwin_universal2 -o /tmp/optimai-cli
+          chmod +x /tmp/optimai-cli
+          sudo mv /tmp/optimai-cli /usr/local/bin/optimai-cli
+          optimai-cli --version || true
+
+      - name: Try to start Docker
+        run: |
+          brew install --cask docker || echo "docker cask install failed"
+          ls /Applications | grep -i docker || true
+          open -a Docker || echo "Docker.app open failed"
+          for i in $(seq 1 36); do
+            if docker info >/dev/null 2>&1; then
+              echo "Docker is RUNNING"
+              docker --version
+              break
+            fi
+            echo "waiting for docker... ($i/36)"
+            sleep 10
+          done
+          docker info || echo "::warning::Docker unavailable on this runner"
+
+      - name: Login (watch logs for URL and approve in your browser!)
+        run: |
+          optimai-cli auth login || optimai-cli auth login --legacy
+
+      - name: Start node
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "Starting OptimAI node..."
+            optimai-cli node start
+          else
+            echo "Docker unavailable - cannot start node on this runner"
+            optimai-cli node status || true
+            exit 1
+          fi
