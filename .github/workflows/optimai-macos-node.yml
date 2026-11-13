@@ -6,10 +6,8 @@ on:
 
 jobs:
   mac-node:
-    # macos-26 = newest runner; reports say nested virtualization (Docker) works here
     runs-on: macos-26
-    # public repo = unlimited free standard runner minutes
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - name: Platform info
         run: |
@@ -23,11 +21,12 @@ jobs:
           sudo mv /tmp/optimai-cli /usr/local/bin/optimai-cli
           optimai-cli --version || true
 
-      - name: Login (watch logs for URL and approve in your browser!)
+      - name: Login (paste mode - check logs for URL/code!)
         run: |
-          optimai-cli auth login || optimai-cli auth login --legacy
+          optimai-cli auth login --paste || echo "LOGIN_EXIT_CODE: $?"
 
-      - name: Try to start Docker (non-blocking launch)
+      - name: Docker and node attempt
+        if: always()
         run: |
           brew install --cask docker || echo "docker cask install failed"
           ls /Applications | grep -i docker || true
@@ -42,13 +41,9 @@ jobs:
             sleep 10
           done
           docker info || echo "::warning::Docker unavailable on this runner"
-
-      - name: Start node
-        if: always()
-        run: |
           if docker info >/dev/null 2>&1; then
             echo "Starting OptimAI node..."
-            optimai-cli node start
+            optimai-cli node start || true
           else
             echo "Docker unavailable - cannot start node on this runner"
             optimai-cli node status || true
