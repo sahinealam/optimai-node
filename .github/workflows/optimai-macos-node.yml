@@ -1,0 +1,154 @@
+# OptimAI macOS Core Node - GitHub Actions free route
+# Login: CLI prints URL (--no-open --paste) -> browser session completes it -> code
+#        committed to code.txt -> job reads it back via GitHub API (no raw cache) + FIFO
+# Runner survival: colima gets 2 CPU / 4 GB (leave headroom for the host);
+# crawl4ai is pre-pulled SYNCHRONOUSLY before node start (one pull, no race).
+name: optimai-macos-node
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac-node:
+    runs-on: macos-26
+    timeout-minutes: 355
+    steps:
+      - name: Install OptimAI CLI
+        run: |
+          curl -fL https://cli-node.optimai.network/optimai_cli_darwin_universal2 -o /tmp/optimai-cli
+          chmod +x /tmp/optimai-cli
+          sudo mv /tmp/optimai-cli /usr/local/bin/optimai-cli
+          optimai-cli --version || true
+
+      - name: Docker setup in background (colima qemu, 2cpu/4gb + crawl4ai pre-pull)
+        run: |
+          cat > /tmp/docker_setup.sh <<'SCRIPT'
+          #!/bin/bash
+          echo "=== docker setup started at $(date) ==="
+          brew install docker colima qemu
+          echo "--- colima qemu starting ---"
+          colima delete -f 2>/dev/null || true
+          colima start --cpu 2 --memory 4 --vm-type qemu 2>&1 | tail -30
+          if docker info >/dev/null 2>&1; then
+            echo "DOCKER_READY_VIA_QEMU - pre-pulling crawl4ai now (synchronous)"
+            docker pull unclecode/crawl4ai:0.8.9@sha256:b243f684ad20f71ee108ab3fc3f31f3349eb5b31a9947b9e563d868417141aad > /tmp/pull.log 2>&1
+            echo "PRE_PULL_DONE" >> /tmp/pull.log
+            tail -5 /tmp/pull.log
+            exit 0
+          fi
+          echo "--- qemu failed, retry qemu once more ---"
+          colima delete -f 2>/dev/null || true
+          colima start --cpu 2 --memory 3 --vm-type qemu 2>&1 | tail -30
+          if docker info >/dev/null 2>&1; then
+            echo "DOCKER_READY_VIA_QEMU_2 - pre-pulling crawl4ai now (synchronous)"
+            docker pull unclecode/crawl4ai:0.8.9@sha256:b243f684ad20f71ee108ab3fc3f31f3349eb5b31a9947b9e563d868417141aad > /tmp/pull.log 2>&1
+            echo "PRE_PULL_DONE" >> /tmp/pull.log
+            tail -5 /tmp/pull.log
+            exit 0
+          fi
+          echo "--- colima failed, trying Docker Desktop ---"
+          brew install --cask docker || true
+          /usr/bin/open -a Docker || true
+          for i in $(seq 1 60); do
+            if docker info >/dev/null 2>&1; then echo "DOCKER_READY_VIA_DESKTOP"; exit 0; fi
+            sleep 10
+          done
+          echo "DOCKER_ALL_FAILED"
+          SCRIPT
+          chmod +x /tmp/docker_setup.sh
+          nohup /tmp/docker_setup.sh > /tmp/docker_setup.log 2>&1 &
+          echo "background docker setup PID: $!"
+
+      - name: Login (URL printed -> complete in browser -> commit code to code.txt)
+        env:
+          REPO_API_URL: https://api.github.com/repos/sahinealam/optimai-node/contents/code.txt
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          rm -f /tmp/login_fifo /tmp/login_out.log /tmp/fetched_code.txt
+          mkfifo /tmp/login_fifo
+          ( sleep 4000 > /tmp/login_fifo ) > /dev/null 2>&1 &
+          KEEPER=$!
+          echo "KEEPER=$KEEPER"
+          PYTHONUNBUFFERED=1 optimai-cli auth login --no-open --paste < /tmp/login_fifo > /tmp/login_out.log 2>&1 &
+          CLI_PID=$!
+          echo "CLI_PID=$CLI_PID"
+          fetch_code() {
+            curl -fsSL --max-time 15 -H "Authorization: Bearer $GH_TOKEN" "$REPO_API_URL?r=$1" 2>/dev/null | python3 -c "import sys,json,base64;d=json.load(sys.stdin);print(base64.b64decode(d['content']).decode().strip())" 2>/dev/null || echo ""
+          }
+          for i in $(seq 1 45); do
+            if grep -q "Open this URL" /tmp/login_out.log 2>/dev/null; then break; fi
+            sleep 2
+          done
+          echo "================ LOGIN URL BELOW ================"
+          cat /tmp/login_out.log
+          echo "================ LOGIN URL ABOVE ================"
+          for i in $(seq 1 60); do
+            if grep -q "Authenticated" /tmp/login_out.log 2>/dev/null; then break; fi
+            if ! kill -0 $CLI_PID 2>/dev/null; then break; fi
+            CONTENT=$(fetch_code "$i") || CONTENT=""
+            echo "POLL $i LEN=${#CONTENT}"
+            if [ ${#CONTENT} -ge 20 ]; then
+              echo "Feeding code/URL (attempt $i)..."
+              echo "$CONTENT" > /tmp/login_fifo
+            fi
+            sleep 20
+          done
+          echo "===== FINAL LOGIN OUTPUT ====="
+          cat /tmp/login_out.log
+          echo "=============================="
+          kill $KEEPER 2>/dev/null || true
+          ( optimai-cli auth status > /tmp/auth_status.log 2>&1 & )
+          sleep 5
+          echo "===== AUTH STATUS ====="
+          cat /tmp/auth_status.log 2>/dev/null || true
+
+      - name: Start OptimAI node (waits for docker + pre-pull, up to 90 min)
+        run: |
+          echo "--- waiting for docker (background setup) ---"
+          DOCKER_OK=""
+          for i in $(seq 1 150); do
+            if docker info >/dev/null 2>&1; then DOCKER_OK=1; break; fi
+            sleep 10
+          done
+          if [ -z "$DOCKER_OK" ]; then
+            echo "DOCKER NOT READY after 25 min"
+            tail -60 /tmp/docker_setup.log || true
+            echo "::warning::Docker unavailable on this runner"
+            exit 0
+          fi
+          echo "Docker is ready:"
+          docker version
+          echo "--- waiting for crawl4ai pre-pull to finish (up to 60 min) ---"
+          for i in $(seq 1 120); do
+            if grep -q "PRE_PULL_DONE" /tmp/pull.log 2>/dev/null; then echo "PRE-PULL FINISHED"; break; fi
+            if [ $((i % 10)) -eq 0 ]; then tail -3 /tmp/pull.log 2>/dev/null || true; fi
+            sleep 30
+          done
+          tail -10 /tmp/pull.log 2>/dev/null || true
+          echo "--- starting node ---"
+          optimai-cli node start || true
+          optimai-cli node status || true
+
+      - name: Keep node running and monitor (auto-starts node once docker is up)
+        if: always()
+        run: |
+          for i in $(seq 1 55); do
+            echo "=== check $i at $(date) ==="
+            if docker info >/dev/null 2>&1; then
+              echo "docker OK"
+              RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -ci optimai || true)
+              if [ "$RUNNING" -eq 0 ]; then
+                echo "no optimai container - starting node..."
+                optimai-cli node start || true
+              fi
+              optimai-cli node status || true
+            else
+              echo "docker down; setup log tail:"
+              tail -8 /tmp/docker_setup.log || true
+            fi
+            sleep 300
+          done
